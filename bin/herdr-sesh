@@ -1,0 +1,396 @@
+#!/usr/bin/env bash
+# herdr-sesh: sesh-style fzf picker for herdr.
+#
+#   open     (action) open the picker as a herdr popup
+#   last     (action) focus the previously focused workspace
+#   record   (event)  workspace.focused hook: track current/previous/MRU
+#   pick     (pane)   run the picker in the current terminal
+#   list, preview, kill, connect: called back by fzf
+#
+# Picker rows are tab-separated: kind, target, startup command, display.
+set -euo pipefail
+
+herdr=${HERDR_BIN_PATH:-herdr}
+self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+plugin_id=${HERDR_PLUGIN_ID:-fedeya.herdr-sesh}
+state_dir=${HERDR_PLUGIN_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/herdr-sesh}
+config_file=${HERDR_SESH_CONFIG:-${HERDR_PLUGIN_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/herdr-sesh}/config.toml}
+
+has() { command -v "$1" >/dev/null 2>&1; }
+
+# --- config ------------------------------------------------------------------
+
+# Minimal TOML reader: [sections], key = "string" | 'literal' | bare | [array].
+# Emits "section.key<TAB>value"; arrays are joined with spaces.
+parse_config() {
+	[ -f "$config_file" ] || return 0
+	awk '
+	function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
+	function quoted(s, q,   i, c, out) {
+		out = ""
+		for (i = 2; i <= length(s); i++) {
+			c = substr(s, i, 1)
+			if (q == "\"" && c == "\\") {
+				i++; c = substr(s, i, 1)
+				if (c == "n" || c == "t") c = " "
+				out = out c; continue
+			}
+			if (c == q) { consumed = i; return out }
+			out = out c
+		}
+		consumed = i; return out
+	}
+	function value(s,   out, c, tok) {
+		c = substr(s, 1, 1)
+		if (c == "\"" || c == "\x27") return quoted(s, c)
+		if (c != "[") { sub(/#.*/, "", s); return trim(s) }
+		out = ""; s = substr(s, 2)
+		while (length(s) > 0) {
+			s = trim(s); c = substr(s, 1, 1)
+			if (c == "]" || c == "") break
+			if (c == ",") { s = substr(s, 2); continue }
+			if (c == "\"" || c == "\x27") { tok = quoted(s, c); s = substr(s, consumed + 1) }
+			else { match(s, /^[^,\]]*/); tok = trim(substr(s, 1, RLENGTH)); s = substr(s, RLENGTH + 1) }
+			out = out (out == "" ? "" : " ") tok
+		}
+		return out
+	}
+	/^[ \t]*(#|$)/ { next }
+	/^[ \t]*\[[^]]+\]/ { s = $0; sub(/^[ \t]*\[/, "", s); sub(/\].*$/, "", s); section = trim(s) "."; next }
+	{
+		eq = index($0, "="); if (!eq) next
+		print section trim(substr($0, 1, eq - 1)) "\t" value(trim(substr($0, eq + 1)))
+	}' "$config_file"
+}
+
+CONFIG=$(parse_config 2>/dev/null || true)
+
+# cfg KEY DEFAULT
+cfg() {
+	local v
+	if v=$(awk -F'\t' -v k="$1" '$1 == k { v = substr($0, length(k) + 2); f = 1 } END { if (f) print v; exit !f }' <<<"$CONFIG"); then
+		printf '%s' "$v"
+	else
+		printf '%s' "$2"
+	fi
+}
+
+cfg_true() { [ "$(cfg "$1" "$2")" = true ]; }
+
+# --- MRU / last workspace ----------------------------------------------------
+
+focused_workspace() { "$herdr" workspace list | jq -r '.result.workspaces[] | select(.focused) | .workspace_id'; }
+
+record() {
+	mkdir -p "$state_dir"
+	local now cur
+	now=$(focused_workspace)
+	cur=$(cat "$state_dir/current" 2>/dev/null || true)
+	if [ -n "$now" ] && [ "$now" != "$cur" ]; then
+		[ -n "$cur" ] && printf '%s' "$cur" >"$state_dir/previous"
+		printf '%s' "$now" >"$state_dir/current"
+		{ printf '%s\n' "$now"; grep -vx "$now" "$state_dir/mru" 2>/dev/null || true; } | head -n 100 >"$state_dir/mru.tmp"
+		mv "$state_dir/mru.tmp" "$state_dir/mru"
+	fi
+}
+
+last() {
+	local prev
+	prev=$(cat "$state_dir/previous" 2>/dev/null || true)
+	[ -n "$prev" ] && "$herdr" workspace focus "$prev" >/dev/null
+	return 0
+}
+
+# --- sources -----------------------------------------------------------------
+
+JQ_DEFS='
+def glyph: {"blocked":"\u001b[31m◉","working":"\u001b[33m●","done":"\u001b[34m✓","idle":"\u001b[32m○"}[.] // "\u001b[90m·";
+def reset: "\u001b[0m";
+def dim: "\u001b[90m";
+def accent: "\u001b[35m";
+'
+
+snapshot() { "$herdr" api snapshot | jq '.result.snapshot'; }
+
+# Linked worktrees show their repo before the label: repo/branch.
+# Ordered like sesh: the current workspace first, then most recently used.
+list_workspaces() {
+	local mru='[]'
+	[ -s "$state_dir/mru" ] && mru=$(jq -R . "$state_dir/mru" | jq -s .)
+	snapshot | jq -r --argjson mru "$mru" "$JQ_DEFS"'
+		. as $s
+		| $s.focused_workspace_id as $cur
+		| $s.workspaces
+		| sort_by(
+			if .workspace_id == $cur then -1
+			else .workspace_id as $id | ($mru | index($id)) // (1e6 + .number) end)[]
+		| . as $w
+		| [$s.agents[] | select(.workspace_id == $w.workspace_id)] as $a
+		| (if $w.worktree.is_linked_worktree then "\(dim)\($w.worktree.repo_name)/\(reset)" else "" end) as $repo
+		| "ws\t\($w.workspace_id)\t\t\($w.agent_status | glyph)\(reset)  \($repo)\(accent)\($w.label)\(reset)"
+		  + (if ($a | length) > 0
+		     then "  " + ([$a[] | "\(.agent_status | glyph) \(dim)\(.agent)\(reset)"] | join(" "))
+		     else "" end)'
+}
+
+list_agents() {
+	snapshot | jq -r "$JQ_DEFS"'
+		(.workspaces | map({(.workspace_id): .label}) | add) as $labels
+		| .agents[]
+		| "agent\t\(.pane_id)\t\t\(.agent_status | glyph) \(.agent_status)\(reset)  \(.agent)  \(accent)\($labels[.workspace_id] // .workspace_id)\(reset)  \(dim)\(.terminal_title_stripped // "")\(reset)"'
+}
+
+list_configs() {
+	has sesh || return 0
+	sesh list -c -j 2>/dev/null | jq -r '.[] | "cfg\t\(.Path)\t\(.StartupCommand // "")\t  \(.Name)"' || true
+}
+
+dir_rows() { awk -v home="$HOME" '{ sub("/$", ""); if ($0 == "") $0 = "/"; d = $0; sub("^" home, "~", d); print "dir\t" $0 "\t\t  " d }'; }
+
+list_zoxide() {
+	has zoxide || return 0
+	zoxide query -l 2>/dev/null | dir_rows || true
+}
+
+find_command() {
+	local cmd
+	cmd=$(cfg find.command "")
+	if [ -n "$cmd" ]; then
+		printf '%s' "$cmd"
+	elif has fd; then
+		printf '%s' 'fd -H -d 2 -t d -E .Trash . "$HOME"'
+	fi
+}
+
+list_find() {
+	local cmd
+	cmd=$(find_command)
+	[ -n "$cmd" ] || return 0
+	bash -c "$cmd" 2>/dev/null | dir_rows || true
+}
+
+open_paths() { "$herdr" pane list | jq -r '.result.panes[].cwd' | sort -u; }
+
+# Drop directory rows that are already open in some workspace.
+hide_open() {
+	if cfg_true picker.hide_open_dirs true; then
+		awk -F'\t' 'NR == FNR { open[$0] = 1; next } !($2 in open)' <(open_paths) -
+	else
+		cat
+	fi
+}
+
+mode_available() {
+	case $1 in
+	workspaces | agents) return 0 ;;
+	configs) has sesh ;;
+	zoxide) has zoxide ;;
+	find) [ -n "$(find_command)" ] ;;
+	*) return 1 ;;
+	esac
+}
+
+list() {
+	local mode=${1:-all} src
+	case $mode in
+	all)
+		for src in $(cfg picker.sources "workspaces configs zoxide"); do
+			mode_available "$src" || continue
+			case $src in
+			zoxide | find) "list_$src" | hide_open ;;
+			*) "list_$src" ;;
+			esac
+		done
+		;;
+	workspaces | agents | configs | zoxide | find) "list_$mode" ;;
+	esac
+}
+
+# --- actions on a row --------------------------------------------------------
+
+workspace_for_path() {
+	"$herdr" pane list | jq -r --arg p "$1" '[.result.panes[] | select(.cwd == $p)][0].workspace_id // empty'
+}
+
+connect() {
+	local kind target startup display path existing label pane
+	IFS=$'\t' read -r kind target startup display <<<"$1"
+	case $kind in
+	ws) "$herdr" workspace focus "$target" >/dev/null ;;
+	agent) "$herdr" agent focus "$target" >/dev/null ;;
+	cfg | dir)
+		path=${target%/}
+		[ -z "$path" ] && path=/
+		existing=$(workspace_for_path "$path")
+		if [ -n "$existing" ]; then
+			"$herdr" workspace focus "$existing" >/dev/null
+			return
+		fi
+		label=$(basename "$path")
+		if [ "$kind" = cfg ]; then
+			label=${display#"${display%%[![:space:]]*}"}
+		fi
+		pane=$("$herdr" workspace create --cwd "$path" --label "$label" --focus | jq -r '.result.root_pane.pane_id // empty')
+		if [ -n "$startup" ] && [ -n "$pane" ]; then
+			"$herdr" pane run "$pane" "$startup" >/dev/null
+		fi
+		;;
+	esac
+}
+
+kill_item() {
+	local kind target
+	IFS=$'\t' read -r kind target _ <<<"$1"
+	[ "$kind" = ws ] && "$herdr" workspace close "$target" >/dev/null
+	return 0
+}
+
+preview() {
+	local kind target pane
+	IFS=$'\t' read -r kind target _ <<<"$1"
+	case $kind in
+	ws)
+		pane=$("$herdr" pane list --workspace "$target" | jq -r '([.result.panes[] | select(.focused)] + .result.panes)[0].pane_id // empty')
+		[ -n "$pane" ] && "$herdr" pane read "$pane" --source visible --ansi
+		;;
+	agent) "$herdr" pane read "$target" --source visible --ansi ;;
+	cfg | dir)
+		if has eza; then
+			eza -1 --all --icons --color=always --group-directories-first "$target" 2>/dev/null
+		else
+			ls -A "$target"
+		fi
+		;;
+	esac
+	return 0
+}
+
+# --- picker ------------------------------------------------------------------
+
+ROSE_PINE=(
+	--color=fg:#908caa,bg:#191724,hl:#ebbcba
+	--color=fg+:#e0def4,bg+:#26233a,hl+:#ebbcba
+	--color=border:#403d52,header:#31748f,gutter:#191724
+	--color=spinner:#f6c177,info:#9ccfd8
+	--color=pointer:#c4a7e7,marker:#eb6f92,prompt:#908caa
+)
+
+pick() {
+	local dep missing=""
+	for dep in fzf jq; do has "$dep" || missing="$missing $dep"; done
+	if [ -n "$missing" ]; then
+		printf 'herdr-sesh: missing required dependencies:%s\n\nPress any key to close.' "$missing"
+		read -r -n 1 -s || true
+		exit 1
+	fi
+
+	local cmd prompt header theme colors opts selection
+	cmd="bash $(printf '%q' "$self")"
+	prompt=$(cfg picker.prompt "⚡  ")
+
+	header="  ^a all ^w workspaces ^e agents"
+	mode_available configs && header="$header ^g configs"
+	mode_available zoxide && header="$header ^x zoxide"
+	mode_available find && header="$header ^f find"
+	header="$header ^d close"
+
+	local args=(
+		--ansi --no-sort --delimiter=$'\t' --with-nth=4
+		--border=rounded --border-label "$(cfg picker.border_label " sesh ")"
+		--prompt "$prompt" --header "$header"
+		--bind 'tab:down,btab:up'
+		--bind "ctrl-a:change-prompt($prompt)+reload($cmd list all)"
+		--bind "ctrl-w:change-prompt(  )+reload($cmd list workspaces)"
+		--bind "ctrl-e:change-prompt(  )+reload($cmd list agents)"
+		--bind "ctrl-d:execute-silent($cmd kill {})+change-prompt($prompt)+reload($cmd list all)"
+	)
+	mode_available configs && args+=(--bind "ctrl-g:change-prompt(  )+reload($cmd list configs)")
+	mode_available zoxide && args+=(--bind "ctrl-x:change-prompt(  )+reload($cmd list zoxide)")
+	mode_available find && args+=(--bind "ctrl-f:change-prompt(  )+reload($cmd list find)")
+
+	if cfg_true picker.preview true; then
+		args+=(--preview-window "$(cfg picker.preview_window "right:55%")" --preview "$cmd preview {}")
+	fi
+
+	# "rose-pine" (default) or "none" to inherit colors from FZF_DEFAULT_OPTS.
+	theme=$(cfg fzf.theme rose-pine)
+	[ "$theme" = rose-pine ] && args+=("${ROSE_PINE[@]}")
+	colors=$(cfg fzf.colors "")
+	[ -n "$colors" ] && args+=("--color=$colors")
+
+	# Extra fzf options, shell-quoted, applied last so they win.
+	opts=$(cfg fzf.options "")
+	local extra=()
+	[ -n "$opts" ] && eval "extra=($opts)"
+
+	selection=$(list all | SHELL=$BASH fzf "${args[@]}" ${extra[@]+"${extra[@]}"}) || exit 0
+	connect "$selection"
+}
+
+# --- popup -------------------------------------------------------------------
+
+# Send one raw request to the herdr socket; succeed only on a result response.
+socket_request() {
+	local sock=${HERDR_SOCKET_PATH:-} response=""
+	[ -S "$sock" ] || return 1
+	if has python3; then
+		response=$(python3 -c '
+import socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sys.argv[1])
+s.sendall(sys.argv[2].encode() + b"\n")
+buf = b""
+while not buf.endswith(b"\n"):
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    buf += chunk
+sys.stdout.write(buf.decode())
+' "$sock" "$1" 2>/dev/null) || return 1
+	elif has nc; then
+		response=$(printf '%s\n' "$1" | nc -U -w 1 "$sock" 2>/dev/null | head -n 1) || return 1
+	else
+		return 1
+	fi
+	jq -e 'has("result")' <<<"$response" >/dev/null 2>&1
+}
+
+open_picker() {
+	local width height request
+	width=$(cfg popup.width "")
+	height=$(cfg popup.height "")
+	if [ -n "$width$height" ]; then
+		if "$herdr" plugin pane open --help 2>/dev/null | grep -q -- '--width'; then
+			local args=(--placement popup)
+			[ -n "$width" ] && args+=(--width "$width")
+			[ -n "$height" ] && args+=(--height "$height")
+			"$herdr" plugin pane open --plugin "$plugin_id" --entrypoint picker "${args[@]}" >/dev/null && return
+		else
+			# herdr 0.9.x accepts popup sizes over the socket but not yet as CLI flags.
+			request=$(jq -cn --arg plugin "$plugin_id" --arg w "$width" --arg h "$height" '
+				def size: if . == "" then null elif test("^[0-9]+$") then tonumber else . end;
+				{id: "herdr-sesh-open", method: "plugin.pane.open",
+				 params: {plugin_id: $plugin, entrypoint: "picker", placement: "popup",
+				          width: ($w | size), height: ($h | size)}}')
+			socket_request "$request" && return
+		fi
+	fi
+	# Manifest defaults: popup, 85% x 80%.
+	"$herdr" plugin pane open --plugin "$plugin_id" --entrypoint picker >/dev/null
+}
+
+case ${1:-pick} in
+open) open_picker ;;
+last) last ;;
+record) record ;;
+pick) pick ;;
+list) list "${2:-all}" ;;
+preview) preview "${2:-}" ;;
+kill) kill_item "${2:-}" ;;
+connect) connect "${2:-}" ;;
+*)
+	echo "usage: herdr-sesh {open|last|record|pick|list [mode]|preview row|kill row|connect row}" >&2
+	exit 2
+	;;
+esac

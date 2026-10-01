@@ -1,0 +1,30 @@
+id = "fedeya.herdr-sesh"
+name = "herdr-sesh"
+version = "0.1.0"
+min_herdr_version = "0.7.4"
+description = "sesh-style fzf picker for herdr: workspaces, agents, sesh configs, zoxide and fd, plus last-workspace toggle"
+platforms = ["linux", "macos"]
+
+[[events]]
+on = "workspace.focused"
+command = ["bash", "bin/herdr-sesh", "record"]
+
+[[actions]]
+id = "open"
+title = "Open sesh picker"
+contexts = ["global"]
+command = ["bash", "bin/herdr-sesh", "open"]
+
+[[actions]]
+id = "last"
+title = "Focus previous workspace"
+contexts = ["global"]
+command = ["bash", "bin/herdr-sesh", "last"]
+
+[[panes]]
+id = "picker"
+title = "sesh"
+placement = "popup"
+width = "85%"
+height = "80%"
+command = ["bash", "bin/herdr-sesh", "pick"]
