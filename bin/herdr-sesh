@@ -208,18 +208,30 @@ list() {
 
 # --- actions on a row --------------------------------------------------------
 
+# Split a row into row_kind, row_target, row_startup and row_display.
+# `read` with IFS=$'\t' would merge empty fields, since tab is IFS whitespace.
+split_row() {
+	local rest=$1
+	row_kind=${rest%%$'\t'*}
+	rest=${rest#*$'\t'}
+	row_target=${rest%%$'\t'*}
+	rest=${rest#*$'\t'}
+	row_startup=${rest%%$'\t'*}
+	row_display=${rest#*$'\t'}
+}
+
 workspace_for_path() {
 	"$herdr" pane list | jq -r --arg p "$1" '[.result.panes[] | select(.cwd == $p)][0].workspace_id // empty'
 }
 
 connect() {
-	local kind target startup display path existing label pane
-	IFS=$'\t' read -r kind target startup display <<<"$1"
-	case $kind in
-	ws) "$herdr" workspace focus "$target" >/dev/null ;;
-	agent) "$herdr" agent focus "$target" >/dev/null ;;
+	local row_kind row_target row_startup row_display path existing label pane
+	split_row "$1"
+	case $row_kind in
+	ws) "$herdr" workspace focus "$row_target" >/dev/null ;;
+	agent) "$herdr" agent focus "$row_target" >/dev/null ;;
 	cfg | dir)
-		path=${target%/}
+		path=${row_target%/}
 		[ -z "$path" ] && path=/
 		existing=$(workspace_for_path "$path")
 		if [ -n "$existing" ]; then
@@ -227,38 +239,38 @@ connect() {
 			return
 		fi
 		label=$(basename "$path")
-		if [ "$kind" = cfg ]; then
-			label=${display#"${display%%[![:space:]]*}"}
+		if [ "$row_kind" = cfg ]; then
+			label=${row_display#"${row_display%%[![:space:]]*}"}
 		fi
 		pane=$("$herdr" workspace create --cwd "$path" --label "$label" --focus | jq -r '.result.root_pane.pane_id // empty')
-		if [ -n "$startup" ] && [ -n "$pane" ]; then
-			"$herdr" pane run "$pane" "$startup" >/dev/null
+		if [ -n "$row_startup" ] && [ -n "$pane" ]; then
+			"$herdr" pane run "$pane" "$row_startup" >/dev/null
 		fi
 		;;
 	esac
 }
 
 kill_item() {
-	local kind target
-	IFS=$'\t' read -r kind target _ <<<"$1"
-	[ "$kind" = ws ] && "$herdr" workspace close "$target" >/dev/null
+	local row_kind row_target row_startup row_display
+	split_row "$1"
+	[ "$row_kind" = ws ] && "$herdr" workspace close "$row_target" >/dev/null
 	return 0
 }
 
 preview() {
-	local kind target pane
-	IFS=$'\t' read -r kind target _ <<<"$1"
-	case $kind in
+	local row_kind row_target row_startup row_display pane
+	split_row "$1"
+	case $row_kind in
 	ws)
-		pane=$("$herdr" pane list --workspace "$target" | jq -r '([.result.panes[] | select(.focused)] + .result.panes)[0].pane_id // empty')
+		pane=$("$herdr" pane list --workspace "$row_target" | jq -r '([.result.panes[] | select(.focused)] + .result.panes)[0].pane_id // empty')
 		[ -n "$pane" ] && "$herdr" pane read "$pane" --source visible --ansi
 		;;
-	agent) "$herdr" pane read "$target" --source visible --ansi ;;
+	agent) "$herdr" pane read "$row_target" --source visible --ansi ;;
 	cfg | dir)
 		if has eza; then
-			eza -1 --all --icons --color=always --group-directories-first "$target" 2>/dev/null
+			eza -1 --all --icons --color=always --group-directories-first "$row_target" 2>/dev/null
 		else
-			ls -A "$target"
+			ls -A "$row_target"
 		fi
 		;;
 	esac
