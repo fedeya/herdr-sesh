@@ -34,6 +34,19 @@ herdr plugin install fedeya/herdr-sesh
 Then add keybindings to `~/.config/herdr/config.toml` and reload the config
 (see below).
 
+### Updating
+
+herdr pins installed plugins to the commit they were installed from and has
+no `plugin update` command, so updates are not automatic. To update,
+reinstall. Your config and state are kept:
+
+```sh
+herdr plugin install fedeya/herdr-sesh --yes
+```
+
+To install a specific release, pass `--ref`, for example `--ref v0.2.0`. See
+[Releases](https://github.com/fedeya/herdr-sesh/releases) for what changed.
+
 ### Requirements
 
 - herdr **0.7.4** or newer
