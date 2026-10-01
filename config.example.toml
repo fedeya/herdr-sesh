@@ -1,0 +1,44 @@
+# herdr-sesh configuration.
+#
+# Copy to the plugin config directory:
+#   cp config.example.toml "$(herdr plugin config-dir fedeya.herdr-sesh)/config.toml"
+#
+# Every key is optional; the values below are the defaults.
+# Supported syntax: [sections], key = "string" | 'literal' | true/false | number,
+# and single-line string arrays.
+
+[popup]
+# Outer popup size: terminal cells (e.g. 120) or a percentage (e.g. "85%").
+# When unset, the manifest default (85% x 80%) is used.
+# width = "85%"
+# height = "80%"
+
+[picker]
+# Sources shown in the default (^a) view, in order.
+# Available: workspaces, agents, configs, zoxide, find.
+# Sources whose tool is not installed are skipped silently.
+sources = ["workspaces", "configs", "zoxide"]
+
+# Hide zoxide/find directories that are already open in a workspace.
+hide_open_dirs = true
+
+prompt = "⚡  "
+border_label = " sesh "
+preview = true
+preview_window = "right:55%"
+
+[fzf]
+# "rose-pine" or "none" (inherit colors from FZF_DEFAULT_OPTS).
+theme = "rose-pine"
+
+# Extra --color spec applied after the theme, e.g. "pointer:#ff0000,prompt:#00ff00".
+colors = ""
+
+# Extra fzf options, shell-quoted, applied last (they override everything above).
+# options = "--layout=reverse --info=inline-right"
+options = ""
+
+[find]
+# Command for the ^f source; must print one directory per line.
+# Default (when fd is installed): fd -H -d 2 -t d -E .Trash . "$HOME"
+# command = "fd -H -d 3 -t d -E .Trash -E node_modules . ~/code"
