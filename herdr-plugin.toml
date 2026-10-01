@@ -1,6 +1,6 @@
 id = "fedeya.herdr-sesh"
 name = "herdr-sesh"
-version = "0.1.0"
+version = "0.2.0"
 min_herdr_version = "0.7.4"
 description = "sesh-style fzf picker for herdr: workspaces, agents, sesh configs, zoxide and fd, plus last-workspace toggle"
 platforms = ["linux", "macos"]
