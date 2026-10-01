@@ -110,6 +110,19 @@ def dim: "\u001b[90m";
 def accent: "\u001b[35m";
 '
 
+# Nerd Font icons per source, like `sesh list --icons`. Written as UTF-8
+# bytes because bash 3.2 has no \u escapes.
+if cfg_true picker.icons true; then
+	icon() { printf "\033[%sm$2\033[0m " "$1"; }
+	ICON_WS=$(icon 34 '\xee\xaf\x88')        # nf-cod-window
+	ICON_AGENT=$(icon 35 '\xf3\xb0\x9a\xa9') # nf-md-robot
+	ICON_CFG=$(icon 90 '\xee\x98\x95')       # nf-seti-config
+	ICON_ZOXIDE=$(icon 36 '\xef\x84\x94')    # nf-fa-folder_open_o
+	ICON_FIND=$(icon 33 '\xef\x81\xbb')      # nf-fa-folder
+else
+	ICON_WS="" ICON_AGENT="" ICON_CFG="  " ICON_ZOXIDE="  " ICON_FIND="  "
+fi
+
 snapshot() { "$herdr" api snapshot | jq '.result.snapshot'; }
 
 # Linked worktrees show their repo before the label: repo/branch.
@@ -117,7 +130,7 @@ snapshot() { "$herdr" api snapshot | jq '.result.snapshot'; }
 list_workspaces() {
 	local mru='[]'
 	[ -s "$state_dir/mru" ] && mru=$(jq -R . "$state_dir/mru" | jq -s .)
-	snapshot | jq -r --argjson mru "$mru" "$JQ_DEFS"'
+	snapshot | jq -r --argjson mru "$mru" --arg icon "$ICON_WS" "$JQ_DEFS"'
 		. as $s
 		| $s.focused_workspace_id as $cur
 		| $s.workspaces
@@ -127,29 +140,32 @@ list_workspaces() {
 		| . as $w
 		| [$s.agents[] | select(.workspace_id == $w.workspace_id)] as $a
 		| (if $w.worktree.is_linked_worktree then "\(dim)\($w.worktree.repo_name)/\(reset)" else "" end) as $repo
-		| "ws\t\($w.workspace_id)\t\t\($w.agent_status | glyph)\(reset)  \($repo)\(accent)\($w.label)\(reset)"
+		| "ws\t\($w.workspace_id)\t\t\($icon)\($w.agent_status | glyph)\(reset)  \($repo)\(accent)\($w.label)\(reset)"
 		  + (if ($a | length) > 0
 		     then "  " + ([$a[] | "\(.agent_status | glyph) \(dim)\(.agent)\(reset)"] | join(" "))
 		     else "" end)'
 }
 
 list_agents() {
-	snapshot | jq -r "$JQ_DEFS"'
+	snapshot | jq -r --arg icon "$ICON_AGENT" "$JQ_DEFS"'
 		(.workspaces | map({(.workspace_id): .label}) | add) as $labels
 		| .agents[]
-		| "agent\t\(.pane_id)\t\t\(.agent_status | glyph) \(.agent_status)\(reset)  \(.agent)  \(accent)\($labels[.workspace_id] // .workspace_id)\(reset)  \(dim)\(.terminal_title_stripped // "")\(reset)"'
+		| "agent\t\(.pane_id)\t\t\($icon)\(.agent_status | glyph) \(.agent_status)\(reset)  \(.agent)  \(accent)\($labels[.workspace_id] // .workspace_id)\(reset)  \(dim)\(.terminal_title_stripped // "")\(reset)"'
 }
 
 list_configs() {
 	has sesh || return 0
-	sesh list -c -j 2>/dev/null | jq -r '.[] | "cfg\t\(.Path)\t\(.StartupCommand // "")\t  \(.Name)"' || true
+	# A trailing label column (hidden by --with-nth) names the new workspace.
+	sesh list -c -j 2>/dev/null |
+		jq -r --arg icon "$ICON_CFG" '.[] | "cfg\t\(.Path)\t\(.StartupCommand // "")\t\($icon)\(.Name)\t\(.Name)"' || true
 }
 
-dir_rows() { awk -v home="$HOME" '{ sub("/$", ""); if ($0 == "") $0 = "/"; d = $0; sub("^" home, "~", d); print "dir\t" $0 "\t\t  " d }'; }
+# dir_rows ICON
+dir_rows() { awk -v home="$HOME" -v icon="$1" '{ sub("/$", ""); if ($0 == "") $0 = "/"; d = $0; sub("^" home, "~", d); print "dir\t" $0 "\t\t" icon d }'; }
 
 list_zoxide() {
 	has zoxide || return 0
-	zoxide query -l 2>/dev/null | dir_rows || true
+	zoxide query -l 2>/dev/null | dir_rows "$ICON_ZOXIDE" || true
 }
 
 find_command() {
@@ -166,7 +182,7 @@ list_find() {
 	local cmd
 	cmd=$(find_command)
 	[ -n "$cmd" ] || return 0
-	bash -c "$cmd" 2>/dev/null | dir_rows || true
+	bash -c "$cmd" 2>/dev/null | dir_rows "$ICON_FIND" || true
 }
 
 open_paths() { "$herdr" pane list | jq -r '.result.panes[].cwd' | sort -u; }
@@ -208,8 +224,9 @@ list() {
 
 # --- actions on a row --------------------------------------------------------
 
-# Split a row into row_kind, row_target, row_startup and row_display.
-# `read` with IFS=$'\t' would merge empty fields, since tab is IFS whitespace.
+# Split a row into row_kind, row_target, row_startup, row_display and the
+# optional row_label. `read` with IFS=$'\t' would merge empty fields, since
+# tab is IFS whitespace.
 split_row() {
 	local rest=$1
 	row_kind=${rest%%$'\t'*}
@@ -217,7 +234,9 @@ split_row() {
 	row_target=${rest%%$'\t'*}
 	rest=${rest#*$'\t'}
 	row_startup=${rest%%$'\t'*}
-	row_display=${rest#*$'\t'}
+	rest=${rest#*$'\t'}
+	row_display=${rest%%$'\t'*}
+	row_label=${rest#*$'\t'}
 }
 
 workspace_for_path() {
@@ -225,7 +244,7 @@ workspace_for_path() {
 }
 
 connect() {
-	local row_kind row_target row_startup row_display path existing label pane
+	local row_kind row_target row_startup row_display row_label path existing label pane
 	split_row "$1"
 	case $row_kind in
 	ws) "$herdr" workspace focus "$row_target" >/dev/null ;;
@@ -239,9 +258,7 @@ connect() {
 			return
 		fi
 		label=$(basename "$path")
-		if [ "$row_kind" = cfg ]; then
-			label=${row_display#"${row_display%%[![:space:]]*}"}
-		fi
+		[ "$row_kind" = cfg ] && [ -n "$row_label" ] && label=$row_label
 		pane=$("$herdr" workspace create --cwd "$path" --label "$label" --focus | jq -r '.result.root_pane.pane_id // empty')
 		if [ -n "$row_startup" ] && [ -n "$pane" ]; then
 			"$herdr" pane run "$pane" "$row_startup" >/dev/null
@@ -251,14 +268,14 @@ connect() {
 }
 
 kill_item() {
-	local row_kind row_target row_startup row_display
+	local row_kind row_target row_startup row_display row_label
 	split_row "$1"
 	[ "$row_kind" = ws ] && "$herdr" workspace close "$row_target" >/dev/null
 	return 0
 }
 
 preview() {
-	local row_kind row_target row_startup row_display pane
+	local row_kind row_target row_startup row_display row_label pane
 	split_row "$1"
 	case $row_kind in
 	ws)
@@ -312,13 +329,13 @@ pick() {
 		--prompt "$prompt" --header "$header"
 		--bind 'tab:down,btab:up'
 		--bind "ctrl-a:change-prompt($prompt)+reload($cmd list all)"
-		--bind "ctrl-w:change-prompt(  )+reload($cmd list workspaces)"
-		--bind "ctrl-e:change-prompt(  )+reload($cmd list agents)"
+		--bind "ctrl-w:change-prompt(🪟  )+reload($cmd list workspaces)"
+		--bind "ctrl-e:change-prompt(🤖  )+reload($cmd list agents)"
 		--bind "ctrl-d:execute-silent($cmd kill {})+change-prompt($prompt)+reload($cmd list all)"
 	)
-	mode_available configs && args+=(--bind "ctrl-g:change-prompt(  )+reload($cmd list configs)")
-	mode_available zoxide && args+=(--bind "ctrl-x:change-prompt(  )+reload($cmd list zoxide)")
-	mode_available find && args+=(--bind "ctrl-f:change-prompt(  )+reload($cmd list find)")
+	mode_available configs && args+=(--bind "ctrl-g:change-prompt(⚙️  )+reload($cmd list configs)")
+	mode_available zoxide && args+=(--bind "ctrl-x:change-prompt(📁  )+reload($cmd list zoxide)")
+	mode_available find && args+=(--bind "ctrl-f:change-prompt(🔎  )+reload($cmd list find)")
 
 	if cfg_true picker.preview true; then
 		args+=(--preview-window "$(cfg picker.preview_window "right:55%")" --preview "$cmd preview {}")

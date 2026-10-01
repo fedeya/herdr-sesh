@@ -22,6 +22,10 @@ sources = ["workspaces", "configs", "zoxide"]
 # Hide zoxide/find directories that are already open in a workspace.
 hide_open_dirs = true
 
+# Nerd Font icons per source, like `sesh list --icons`. Set to false if your
+# terminal font has no Nerd Font glyphs.
+icons = true
+
 prompt = "⚡  "
 border_label = " sesh "
 preview = true

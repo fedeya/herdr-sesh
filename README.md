@@ -22,6 +22,8 @@ like `sesh last`.
 - **Enter** focuses the workspace or agent. On a directory, it focuses the
   workspace that already has it open, or creates a new one.
 - **Last workspace**: toggle between the current and previous workspace.
+- **Icons** per source, like `sesh list --icons`, plus a prompt for each mode
+  (⚡ all, 🪟 workspaces, 🤖 agents, ⚙️ configs, 📁 zoxide, 🔎 find).
 
 ## Installation
 
@@ -44,6 +46,9 @@ Then add keybindings to `~/.config/herdr/config.toml` and reload the config
 - Optional, only used for a custom popup size on herdr versions whose
   `plugin pane open` CLI has no `--width`/`--height` flags: `python3` or `nc`
   with Unix socket support (`-U`)
+
+Icons need a [Nerd Font](https://www.nerdfonts.com) in your terminal; set
+`picker.icons = false` otherwise.
 
 Linux and macOS are supported.
 
@@ -114,6 +119,7 @@ height = "80%"
 [picker]
 sources = ["workspaces", "configs", "zoxide"]  # ^a view: workspaces, agents, configs, zoxide, find
 hide_open_dirs = true                          # hide dirs already open in a workspace
+icons = true                                   # Nerd Font icons per source
 prompt = "⚡  "
 border_label = " sesh "
 preview = true
