@@ -6,7 +6,6 @@ or open a new workspace from your sesh configs, zoxide history or any
 directory, all from one popup. It also includes a "last workspace" toggle,
 like `sesh last`.
 
-<!-- TODO: replace with a real recording -->
 ![herdr-sesh demo](docs/demo.gif)
 
 ## Features
@@ -157,6 +156,15 @@ herdr plugin log list --plugin fedeya.herdr-sesh
 
 You can also run the picker in any terminal inside herdr with
 `bash bin/herdr-sesh pick`.
+
+The demo GIF is recorded with [vhs](https://github.com/charmbracelet/vhs) in a
+throwaway environment: a fake `HOME` with sample projects, zoxide history,
+sesh configs, simulated agents, and its own herdr server. It needs the
+JetBrainsMono Nerd Font. To regenerate it, run:
+
+```sh
+docs/demo/record.sh
+```
 
 ## License
 
